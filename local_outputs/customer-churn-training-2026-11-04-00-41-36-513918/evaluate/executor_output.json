@@ -1,1 +1,0 @@
-{"parameterValues": {"Output": 0.8166666666666667}, "artifacts": {"metrics": {"artifacts": [{"name": "metrics", "uri": "/home/hatch/workspace/github-career/gcp-projects/gcp-vertex-ml-pipeline/local_outputs/customer-churn-training-2026-11-04-00-41-36-513918/evaluate/metrics", "metadata": {"accuracy": 0.8166666666666667, "roc_auc": 0.8944697074089385, "test_rows": 300}}]}}}
