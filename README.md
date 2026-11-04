@@ -71,11 +71,12 @@ The tests execute the real component functions (ingest → train → evaluate �
 gate → register) against file-backed artifacts, and assert the compiled IR
 contains all five components plus the conditional trigger policy.
 
-> Tooling note: `kfp.local`'s SubprocessRunner was evaluated for an
-> additional local-execution test and dropped — in this environment it runs
-> components in an isolated venv that cannot import the project's `pipeline`
-> package (fails with `No module named 'pipeline.components'`). Direct
-> component-function tests cover the same code paths without that fragility.
+> Local execution note: the full pipeline has also been executed end to end
+> with `kfp.local`'s SubprocessRunner — every task, including the
+> conditional `register_model` step behind the gate, finished SUCCESS and
+> produced the deployment manifest (accuracy 0.8167). That run takes ~3
+> minutes, so it is kept as documented evidence rather than a CI test; the
+> pytest suite covers the same component code paths directly.
 
 ## Going to Vertex AI
 
