@@ -1,0 +1,5 @@
+# Compile + run form: KFP SDK for the pipeline definition; pandas/scikit-learn
+# are what the components execute with (locally here, in Vertex containers there).
+kfp>=2.7,<3.0
+pandas>=2.2
+scikit-learn>=1.5

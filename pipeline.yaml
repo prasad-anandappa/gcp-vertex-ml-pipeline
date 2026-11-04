@@ -1,0 +1,481 @@
+# PIPELINE DEFINITION
+# Name: customer-churn-training
+# Description: Trains a churn classifier, gates deployment on held-out accuracy, and registers the model only when the gate passes.
+# Inputs:
+#    accuracy_threshold: float [Default: 0.75]
+#    csv_uri: str [Default: 'data/customers.csv']
+#    random_state: int [Default: 42.0]
+#    test_size: float [Default: 0.25]
+components:
+  comp-condition-1:
+    dag:
+      tasks:
+        register-model:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-register-model
+          inputs:
+            artifacts:
+              model:
+                componentInputArtifact: pipelinechannel--train-model
+            parameters:
+              accuracy:
+                componentInputParameter: pipelinechannel--evaluate-Output
+          taskInfo:
+            name: register-model
+    inputDefinitions:
+      artifacts:
+        pipelinechannel--train-model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        pipelinechannel--evaluate-Output:
+          parameterType: NUMBER_DOUBLE
+        pipelinechannel--metric-gate-Output:
+          parameterType: BOOLEAN
+  comp-evaluate:
+    executorLabel: exec-evaluate
+    inputDefinitions:
+      artifacts:
+        dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        random_state:
+          defaultValue: 42.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        test_size:
+          defaultValue: 0.25
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: NUMBER_DOUBLE
+  comp-ingest:
+    executorLabel: exec-ingest
+    inputDefinitions:
+      parameters:
+        csv_uri:
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: NUMBER_INTEGER
+  comp-metric-gate:
+    executorLabel: exec-metric-gate
+    inputDefinitions:
+      parameters:
+        accuracy:
+          parameterType: NUMBER_DOUBLE
+        threshold:
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      parameters:
+        Output:
+          parameterType: BOOLEAN
+  comp-register-model:
+    executorLabel: exec-register-model
+    inputDefinitions:
+      artifacts:
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        accuracy:
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        manifest:
+          artifactType:
+            schemaTitle: system.Artifact
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: STRING
+  comp-train:
+    executorLabel: exec-train
+    inputDefinitions:
+      artifacts:
+        dataset:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+      parameters:
+        random_state:
+          defaultValue: 42.0
+          isOptional: true
+          parameterType: NUMBER_INTEGER
+        test_size:
+          defaultValue: 0.25
+          isOptional: true
+          parameterType: NUMBER_DOUBLE
+    outputDefinitions:
+      artifacts:
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        Output:
+          parameterType: NUMBER_DOUBLE
+deploymentSpec:
+  executors:
+    exec-evaluate:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas>=2.2'\
+          \ 'scikit-learn>=1.5'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.18.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate(\n    dataset: dsl.Input[dsl.Dataset],\n    model: dsl.Input[dsl.Model],\n\
+          \    metrics: dsl.Output[dsl.Metrics],\n    test_size: float = 0.25,\n \
+          \   random_state: int = 42,\n) -> float:\n    \"\"\"Scores the model on\
+          \ the held-out split (same seed/split as train, so\n    the rows evaluated\
+          \ here are exactly the rows training never saw) and logs\n    accuracy +\
+          \ ROC AUC to the metrics artifact. Returns accuracy \u2014 the value\n \
+          \   the metric gate consumes.\n    \"\"\"\n    import pickle\n\n    import\
+          \ pandas as pd\n    from sklearn.metrics import accuracy_score, roc_auc_score\n\
+          \    from sklearn.model_selection import train_test_split\n\n    features\
+          \ = [\"age\", \"income\", \"visits_per_month\", \"tenure_months\"]\n   \
+          \ df = pd.read_csv(dataset.path)\n    x, y = df[features], df[\"churned\"\
+          ]\n    _, x_test, _, y_test = train_test_split(\n        x, y, test_size=test_size,\
+          \ random_state=random_state, stratify=y\n    )\n\n    with open(model.path,\
+          \ \"rb\") as fh:\n        clf = pickle.load(fh)\n\n    predictions = clf.predict(x_test)\n\
+          \    probabilities = clf.predict_proba(x_test)[:, 1]\n    accuracy = float(accuracy_score(y_test,\
+          \ predictions))\n    auc = float(roc_auc_score(y_test, probabilities))\n\
+          \n    metrics.log_metric(\"accuracy\", accuracy)\n    metrics.log_metric(\"\
+          roc_auc\", auc)\n    metrics.log_metric(\"test_rows\", len(x_test))\n  \
+          \  return accuracy\n\n"
+        image: python:3.12
+    exec-ingest:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - ingest
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas>=2.2'\
+          \  &&  python3 -m pip install --quiet --no-warn-script-location 'kfp==2.18.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef ingest(csv_uri: str, dataset: dsl.Output[dsl.Dataset]) -> int:\n\
+          \    \"\"\"Reads the source CSV, validates the expected schema, drops incomplete\n\
+          \    rows, and writes the cleaned dataset artifact.\n\n    ``csv_uri`` may\
+          \ be a local path (local runs/tests) or a ``gs://`` URI\n    (Vertex runs,\
+          \ where pandas reads it via gcsfs).\n    \"\"\"\n    import pandas as pd\n\
+          \n    df = pd.read_csv(csv_uri)\n    required = {\"age\", \"income\", \"\
+          visits_per_month\", \"tenure_months\", \"churned\"}\n    missing = required\
+          \ - set(df.columns)\n    if missing:\n        raise ValueError(f\"dataset\
+          \ is missing required columns: {sorted(missing)}\")\n\n    before = len(df)\n\
+          \    df = df.dropna().reset_index(drop=True)\n    df.to_csv(dataset.path,\
+          \ index=False)\n\n    dataset.metadata[\"rows\"] = len(df)\n    dataset.metadata[\"\
+          dropped_rows\"] = before - len(df)\n    dataset.metadata[\"source\"] = csv_uri\n\
+          \    return len(df)\n\n"
+        image: python:3.12
+    exec-metric-gate:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - metric_gate
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.18.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef metric_gate(accuracy: float, threshold: float) -> bool:\n   \
+          \ \"\"\"The deploy gate: True only when held-out accuracy meets the threshold.\n\
+          \n    A separate component (rather than an inline condition) so the decision\
+          \ is\n    a named, logged, unit-testable step in the pipeline graph.\n \
+          \   \"\"\"\n    passed = accuracy >= threshold\n    print(\n        f\"\
+          metric gate: accuracy={accuracy:.4f} threshold={threshold:.4f} \"\n    \
+          \    f\"-> {'PASS' if passed else 'FAIL'}\"\n    )\n    return passed\n\n"
+        image: python:3.12
+    exec-register-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - register_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.18.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"' && \"\
+          $0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef register_model(\n    model: dsl.Input[dsl.Model],\n    accuracy:\
+          \ float,\n    manifest: dsl.Output[dsl.Artifact],\n) -> str:\n    \"\"\"\
+          Conditional deploy step \u2014 runs only when the metric gate passes.\n\n\
+          \    Writes a deployment manifest describing the model that cleared the\
+          \ gate.\n    In a credentialed Vertex AI environment this step additionally\
+          \ calls\n    ``google.cloud.aiplatform.Model.upload`` + ``Endpoint.deploy``\
+          \ (see the\n    README's \"Going to Vertex AI\" section); here it deliberately\
+          \ stops at the\n    manifest so the pipeline stays runnable and testable\
+          \ with no GCP account,\n    and so a model can never be \"deployed\" by\
+          \ accident from a laptop.\n    \"\"\"\n    import json\n    from datetime\
+          \ import datetime, timezone\n\n    doc = {\n        \"model_uri\": model.uri,\n\
+          \        \"accuracy\": accuracy,\n        \"registered_at\": datetime.now(timezone.utc).strftime(\"\
+          %Y-%m-%dT%H:%M:%SZ\"),\n        \"target\": \"Vertex AI Model Registry\"\
+          ,\n        \"status\": \"manifest-only: no GCP credentials in this environment\"\
+          ,\n    }\n    with open(manifest.path, \"w\") as fh:\n        json.dump(doc,\
+          \ fh, indent=2)\n\n    manifest.metadata[\"accuracy\"] = accuracy\n    manifest.metadata[\"\
+          target\"] = doc[\"target\"]\n    return doc[\"status\"]\n\n"
+        image: python:3.12
+    exec-train:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'pandas>=2.2'\
+          \ 'scikit-learn>=1.5'  &&  python3 -m pip install --quiet --no-warn-script-location\
+          \ 'kfp==2.18.0' '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"\
+          3.9\"' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train(\n    dataset: dsl.Input[dsl.Dataset],\n    model: dsl.Output[dsl.Model],\n\
+          \    test_size: float = 0.25,\n    random_state: int = 42,\n) -> float:\n\
+          \    \"\"\"Trains a RandomForest churn classifier and serialises it as the\
+          \ model\n    artifact. Returns training accuracy (evaluation on held-out\
+          \ data is the\n    evaluate component's job \u2014 training accuracy is\
+          \ reported, never gated on).\n    \"\"\"\n    import pickle\n\n    import\
+          \ pandas as pd\n    from sklearn.ensemble import RandomForestClassifier\n\
+          \    from sklearn.model_selection import train_test_split\n\n    features\
+          \ = [\"age\", \"income\", \"visits_per_month\", \"tenure_months\"]\n   \
+          \ df = pd.read_csv(dataset.path)\n    x, y = df[features], df[\"churned\"\
+          ]\n    x_train, _, y_train, _ = train_test_split(\n        x, y, test_size=test_size,\
+          \ random_state=random_state, stratify=y\n    )\n\n    clf = RandomForestClassifier(\n\
+          \        n_estimators=200, random_state=random_state, n_jobs=-1\n    )\n\
+          \    clf.fit(x_train, y_train)\n\n    with open(model.path, \"wb\") as fh:\n\
+          \        pickle.dump(clf, fh)\n\n    model.metadata[\"framework\"] = \"\
+          scikit-learn RandomForestClassifier\"\n    model.metadata[\"features\"]\
+          \ = \",\".join(features)\n    model.metadata[\"train_rows\"] = len(x_train)\n\
+          \    return float(clf.score(x_train, y_train))\n\n"
+        image: python:3.12
+pipelineInfo:
+  description: Trains a churn classifier, gates deployment on held-out accuracy, and
+    registers the model only when the gate passes.
+  name: customer-churn-training
+root:
+  dag:
+    tasks:
+      condition-1:
+        componentRef:
+          name: comp-condition-1
+        dependentTasks:
+        - evaluate
+        - metric-gate
+        - train
+        inputs:
+          artifacts:
+            pipelinechannel--train-model:
+              taskOutputArtifact:
+                outputArtifactKey: model
+                producerTask: train
+          parameters:
+            pipelinechannel--evaluate-Output:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: evaluate
+            pipelinechannel--metric-gate-Output:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: metric-gate
+        taskInfo:
+          name: accuracy-gate-passed
+        triggerPolicy:
+          condition: inputs.parameter_values['pipelinechannel--metric-gate-Output']
+            == true
+      evaluate:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-evaluate
+        dependentTasks:
+        - ingest
+        - train
+        inputs:
+          artifacts:
+            dataset:
+              taskOutputArtifact:
+                outputArtifactKey: dataset
+                producerTask: ingest
+            model:
+              taskOutputArtifact:
+                outputArtifactKey: model
+                producerTask: train
+          parameters:
+            random_state:
+              componentInputParameter: random_state
+            test_size:
+              componentInputParameter: test_size
+        taskInfo:
+          name: evaluate
+      ingest:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-ingest
+        inputs:
+          parameters:
+            csv_uri:
+              componentInputParameter: csv_uri
+        taskInfo:
+          name: ingest
+      metric-gate:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-metric-gate
+        dependentTasks:
+        - evaluate
+        inputs:
+          parameters:
+            accuracy:
+              taskOutputParameter:
+                outputParameterKey: Output
+                producerTask: evaluate
+            threshold:
+              componentInputParameter: accuracy_threshold
+        taskInfo:
+          name: metric-gate
+      train:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train
+        dependentTasks:
+        - ingest
+        inputs:
+          artifacts:
+            dataset:
+              taskOutputArtifact:
+                outputArtifactKey: dataset
+                producerTask: ingest
+          parameters:
+            random_state:
+              componentInputParameter: random_state
+            test_size:
+              componentInputParameter: test_size
+        taskInfo:
+          name: train
+  inputDefinitions:
+    parameters:
+      accuracy_threshold:
+        defaultValue: 0.75
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+      csv_uri:
+        defaultValue: data/customers.csv
+        isOptional: true
+        parameterType: STRING
+      random_state:
+        defaultValue: 42.0
+        isOptional: true
+        parameterType: NUMBER_INTEGER
+      test_size:
+        defaultValue: 0.25
+        isOptional: true
+        parameterType: NUMBER_DOUBLE
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.18.0
